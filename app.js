@@ -18,8 +18,37 @@ const shapes = {
 const icon = name => `<svg class="icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${shapes[name] || shapes.users}</svg>`;
 const esc = value => String(value ?? '').replace(/[&<>"']/g, x => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[x]));
 const main = document.querySelector('#main');
-const tables = ['person', 'client', 'appointment', 'scheduledfor', 'family', 'member_in_family', 'member_role', 'role', 'counselor', 'employee', 'room'];
-const keys = ['personid', 'clientid', 'appointmentid', 'appointmentid,clientid', 'familyid', 'familyid,memberid', 'familyid,memberid,roleid', 'roleid', 'counselorid', 'employeeid', 'roomnumber'];
+const tables = ['person', 'client', 'appointment', 'scheduledfor', 'family', 'member_in_family', 'member_role', 'role', 'counselor', 'employee', 'room', 'family_member'];
+const keys = ['personid', 'clientid', 'appointmentid', 'appointmentid,clientid', 'familyid', 'familyid,memberid', 'familyid,memberid,roleid', 'roleid', 'counselorid', 'employeeid', 'roomnumber', 'memberid'];
+const columns = {
+  person: 'personid,firstname,lastname,address,city,state,zip,phone,email',
+  client: 'clientid,foundout,remindermethod,referredby',
+  appointment: 'appointmentid,appointmenttime,duration,counselorid,employeeid,roomnumber,notes',
+  scheduledfor: 'appointmentid,clientid,assignment,kept',
+  family: 'familyid,familyname,datefounded', member_in_family: 'familyid,memberid,datejoined',
+  member_role: 'familyid,memberid,roleid', role: 'roleid,rolename',
+  counselor: 'counselorid,degreesuffix', employee: 'employeeid,datehired,wage,supervisorid',
+  room: 'roomnumber,roomname', family_member: 'memberid'
+};
+const staffRoles = ['raft_admin', 'raft_scheduler', 'raft_counselor'];
+let staffRole = null, browseTable = 'person';
+function tokenRole(nextSession) {
+  try {
+    const encoded = nextSession.access_token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/');
+    const role = JSON.parse(atob(encoded)).role;
+    return staffRoles.includes(role) ? role : null;
+  } catch { return null; }
+}
+function visibleColumns(table) {
+  return columns[table].split(',').filter(column =>
+    !(table === 'employee' && column === 'wage' && staffRole !== 'raft_admin') &&
+    !(staffRole === 'raft_scheduler' && ((table === 'appointment' && column === 'notes') || (table === 'scheduledfor' && column === 'assignment')))
+  ).join(',');
+}
+const canManage = () => staffRole === 'raft_admin' || staffRole === 'raft_scheduler';
+function editableTypes() {
+  return staffRole === 'raft_admin' ? tables : staffRole === 'raft_scheduler' ? ['client','appointment','person','room'] : ['appointment','scheduledfor'];
+}
 let data = null, loadError = '', loading = true, selectedClient = null, search = '', page = 'home', formType = 'client', formMode = 'new', recordID = '', partialID = null, existingPersonID = '', saving = false;
 let lastLoaded = null;
 let session = null, authReady = false, authEpoch = 0, loadSequence = 0;
@@ -36,8 +65,11 @@ function showAuthError(message = '') {
   authError.hidden = !message;
 }
 function applySession(nextSession) {
-  const changed = session?.user.id !== nextSession?.user.id;
+  const nextRole = nextSession ? tokenRole(nextSession) : null;
+  const changed = session?.user.id !== nextSession?.user.id || staffRole !== nextRole;
   session = nextSession;
+  staffRole = nextRole;
+  document.querySelector('#staff-role').textContent = session ? (staffRole || 'No authorized staff role') : '';
   authReady = true;
   authScreen.hidden = !!session;
   appShell.hidden = !session;
@@ -49,6 +81,7 @@ function applySession(nextSession) {
     data = null; loadError = ''; lastLoaded = null; loading = true;
     selectedClient = null; search = ''; formType = 'client'; formMode = 'new';
     recordID = ''; partialID = null; existingPersonID = ''; saving = false;
+    if (staffRole === 'raft_counselor') { formType = 'appointment'; formMode = 'edit'; }
     main.innerHTML = '';
     document.querySelector('#toast').style.display = 'none';
     authForm.reset();
@@ -127,7 +160,7 @@ async function fetchTable(table, index, epoch) {
   const rows = [];
   for (let offset = 0; ;) {
     if (!session || epoch !== authEpoch) throw new Error('Session ended.');
-    let query = db.from(table).select('*', { count: 'exact' });
+    let query = db.from(table).select(visibleColumns(table), { count: 'exact' });
     for (const key of keys[index].split(',')) query = query.order(key);
     const { data: batch, error, count } = await query.range(offset, offset + 499);
     if (error) throw new Error(`${table}: ${error.message}`);
@@ -138,7 +171,7 @@ async function fetchTable(table, index, epoch) {
   }
 }
 async function load() {
-  if (!session) return;
+  if (!session || !staffRole) { loading = false; render(); return; }
   const epoch = authEpoch, sequence = ++loadSequence;
   loading = true; loadError = ''; render();
   document.querySelector('#connection').textContent = 'Connecting';
@@ -165,6 +198,7 @@ function render() {
   document.title = `${paths[page][0]} · RAFT`;
   document.querySelector('#page-label').textContent = paths[page][0];
   document.querySelector('#nav').innerHTML = Object.entries(paths).map(([key, [label, symbol]]) => `<a class="nav-link ${page === key ? 'active' : ''}" href="#${key}" ${page === key ? 'aria-current="page"' : ''}>${icon(symbol)}${label}${page === key ? '<span class="nav-arrow">›</span>' : ''}</a>`).join('');
+  if (!staffRole) { main.innerHTML = '<div class="error-box" role="alert">Your access token does not contain an authorized RAFT staff role. Contact your Supabase administrator, then sign out and sign in again. No records have been loaded.</div>'; return; }
   if (loading) { main.innerHTML = '<div class="loading" role="status">Opening your workspace…</div>'; return; }
   if (loadError) { main.innerHTML = `${heading('YOUR WORKSPACE', 'Let’s reconnect.', 'Your database could not be loaded. No sample data is shown.')}<div class="error-box" role="alert">${esc(loadError)}<br>Check network access and the existing raft schema’s API permissions.</div><button class="btn primary" id="retry">${icon('refresh')}Try again</button>`; document.querySelector('#retry').onclick = load; return; }
   main.innerHTML = ({ home: homeView, clients: clientView, dashboard: dashboardView, records: recordView })[page]();
@@ -178,7 +212,7 @@ function homeView() {
   const appointments = today.length ? today : upcoming.length ? upcoming : recent;
   const appointmentHeading = today.length ? 'Today’s appointments' : upcoming.length ? 'Next upcoming appointments' : 'Most recent appointments';
   const appointmentSubtitle = today.length ? date(new Date().toISOString(), { weekday: 'long' }) : upcoming.length ? 'None today. Upcoming appointments, soonest first.' : 'None today or upcoming. Appointment history, most recent first.';
-  return `${heading('THE FRONT DESK', 'A good day starts with care.', 'Welcome back. Here’s your practice at a glance.', button('Add a record', '#records', 'plus', true))}
+  return `${heading('THE FRONT DESK', 'A good day starts with care.', 'Welcome back. Here’s your practice at a glance.', button(canManage() ? 'Add a record' : 'Update clinical details', '#records', 'plus', true))}
   <section class="hero"><div class="hero-copy"><div class="eyebrow">A LITTLE ORGANIZATION. MORE CONNECTION.</div><h2>People first.<br>Everything else, right here.</h2><p>Find a client, plan an appointment, and keep care moving.</p>${button('Find a client', '#clients', 'search')}</div><div class="hero-art" aria-hidden="true"><svg viewBox="0 0 360 240" preserveAspectRatio="xMidYMid slice"><circle cx="255" cy="115" r="131" fill="#e1e9d2"/><circle cx="255" cy="115" r="95" fill="#d5e2c0"/><path d="M242 252c-9-51-5-99 9-151" stroke="#789363" stroke-width="2" fill="none"/><path d="M248 174c-47 0-70-28-73-54 40-3 71 18 73 54Z" fill="#a2b88b"/><path d="M249 151c-7-39 12-67 47-78 5 34-11 62-47 78Z" fill="#7e9b6e"/><path d="M242 212c-39 0-67-22-72-49 39-2 67 13 72 49Z" fill="#bbcca7"/><path d="M246 196c0-35 26-58 60-59-3 37-26 57-60 59Z" fill="#95ae7e"/><circle cx="168" cy="72" r="10" fill="#c5d4b2"/><path d="M117 220c44-19 87-22 139-7" fill="none" stroke="#b5c7a0" stroke-width="2"/><path d="m312 45 3-8 3 8 8 3-8 3-3 8-3-8-8-3Z" fill="#9ab580"/></svg></div></section>
   <section class="stats" aria-label="Practice overview">${stat('Today’s appointments', today.length, 'Scheduled for today', 'calendar')}${stat('Clients', data.client.length, 'People in our care', 'users')}${stat('Families', data.family.length, 'Connections that matter', 'heart')}${stat('Counselors', data.counselor.length, 'Supporting our community', 'users')}</section>
   <div class="content-grid"><section class="panel"><div class="panel-head"><div><h2>${appointmentHeading}</h2><p>${appointmentSubtitle}</p></div><a class="text-link" href="#records">Manage ${icon('arrow')}</a></div>${appointments.length ? appointmentTable(appointments, true, null, !today.length) : empty('No appointments on record.', 'Appointments will appear here once scheduled.')}<div class="mini-summary">${data.appointment.length} appointments in the database · <a class="text-link" href="#dashboard">See the bigger picture →</a></div></section>
@@ -193,7 +227,7 @@ function appointmentTable(appointments, home = false, clientID = null, showDate 
     const counselor = `${name(a.counselorid)}`;
     const sf = clientID ? data.scheduledfor.find(s => s.appointmentid === a.appointmentid && s.clientid === clientID) : null;
     const clients = data.scheduledfor.filter(s => s.appointmentid === a.appointmentid).map(s => name(s.clientid)).join(', ');
-    return `<tr><td><strong>${home ? `${showDate ? date(a.appointmenttime) + ' / ' : ''}${time(a.appointmenttime)}` : date(a.appointmenttime)}</strong><small>${home ? esc(clients || 'No linked clients') : time(a.appointmenttime)} · ${a.duration == null ? 'Duration not recorded' : `${a.duration} min`}</small>${sf?.assignment ? `<small>Assignment: ${esc(sf.assignment)}</small>` : ''}</td><td>${esc(counselor)}<small>${esc(data.counselor.find(c => c.counselorid === a.counselorid)?.degreesuffix || '')}</small></td><td>${clientID ? `<span class="badge ${sf?.kept == null ? 'gray' : sf.kept ? '' : 'amber'}">${sf?.kept == null ? 'Not recorded' : sf.kept ? 'Kept' : 'Not kept'}</span>` : esc(data.room.find(r => r.roomnumber === a.roomnumber)?.roomname || `Room ${a.roomnumber}`)}</td><td><button class="table-btn" data-edit-appointment="${a.appointmentid}" aria-label="Edit appointment ${a.appointmentid}">${icon('edit')}</button></td></tr>`;
+    return `<tr><td><strong>${home ? `${showDate ? date(a.appointmenttime) + ' / ' : ''}${time(a.appointmenttime)}` : date(a.appointmenttime)}</strong><small>${home ? esc(clients || 'No linked clients') : time(a.appointmenttime)} · ${a.duration == null ? 'Duration not recorded' : `${a.duration} min`}</small>${staffRole !== 'raft_scheduler' && sf?.assignment ? `<small>Assignment: ${esc(sf.assignment)}</small>` : ''}</td><td>${esc(counselor)}<small>${esc(data.counselor.find(c => c.counselorid === a.counselorid)?.degreesuffix || '')}</small></td><td>${clientID ? `<span class="badge ${sf?.kept == null ? 'gray' : sf.kept ? '' : 'amber'}">${sf?.kept == null ? 'Not recorded' : sf.kept ? 'Kept' : 'Not kept'}</span>` : esc(data.room.find(r => r.roomnumber === a.roomnumber)?.roomname || `Room ${a.roomnumber}`)}</td><td><button class="table-btn" data-edit-appointment="${a.appointmentid}" aria-label="${canManage() ? 'Edit appointment' : 'Update clinical details for appointment'} ${a.appointmentid}">${icon('edit')}</button></td></tr>`;
   }).join('')}</tbody></table></div>`;
 }
 function filteredClients() {
@@ -203,7 +237,7 @@ function filteredClients() {
 function clientItems() { const list = filteredClients(); return list.length ? list.map(c => `<button class="client-item ${selectedClient === c.clientid ? 'selected' : ''}" data-client="${c.clientid}" aria-pressed="${selectedClient === c.clientid}"><span class="avatar">${esc(initials(c.clientid))}</span><span><strong>${esc(name(c.clientid))}</strong><small>Client #${c.clientid}</small></span><span class="nav-arrow">›</span></button>`).join('') : empty('No matching clients.', 'Try another name, email, phone, or ID.', 'search'); }
 function clientView() {
   if (selectedClient == null && data.client.length) selectedClient = [...data.client].sort((a,b) => name(a.clientid).localeCompare(name(b.clientid)))[0].clientid;
-  return `${heading('PEOPLE & CONNECTIONS', 'A familiar face. The full picture.', 'Find the details you need to make every interaction feel personal.', button('Add client', '#records', 'plus', true))}<div class="toolbar"><div class="search-wrap">${icon('search')}<label class="sr-only" for="client-search">Search clients</label><input id="client-search" type="search" placeholder="Search by name, email, phone, or client ID" value="${esc(search)}" autocomplete="off"></div><button class="btn" data-refresh aria-label="Refresh clients">${icon('refresh')}</button></div><div class="lookup-grid"><section class="panel"><div class="panel-head"><h2>Clients</h2><span id="client-count" class="badge gray">${filteredClients().length}</span></div><div id="client-list" class="client-list">${clientItems()}</div></section><div id="client-detail">${clientDetail()}</div></div>`;
+  return `${heading('PEOPLE & CONNECTIONS', 'A familiar face. The full picture.', 'Find the details you need to make every interaction feel personal.', canManage() ? button('Add client', '#records', 'plus', true) : '')}<div class="toolbar"><div class="search-wrap">${icon('search')}<label class="sr-only" for="client-search">Search clients</label><input id="client-search" type="search" placeholder="Search by name, email, phone, or client ID" value="${esc(search)}" autocomplete="off"></div><button class="btn" data-refresh aria-label="Refresh clients">${icon('refresh')}</button></div><div class="lookup-grid"><section class="panel"><div class="panel-head"><h2>Clients</h2><span id="client-count" class="badge gray">${filteredClients().length}</span></div><div id="client-list" class="client-list">${clientItems()}</div></section><div id="client-detail">${clientDetail()}</div></div>`;
 }
 function clientDetail() {
   const c = data.client.find(c => c.clientid === selectedClient);
@@ -213,7 +247,7 @@ function clientDetail() {
   const ids = new Set(data.scheduledfor.filter(s => s.clientid === c.clientid).map(s => s.appointmentid));
   const appointments = data.appointment.filter(a => ids.has(a.appointmentid)).sort((a,b) => String(b.appointmenttime).localeCompare(String(a.appointmenttime)));
   const address = [p.address, [p.city, p.state, p.zip?.trim()].filter(Boolean).join(', ')].filter(Boolean).join('<br>');
-  return `<section class="panel"><div class="detail-top"><span class="avatar">${esc(initials(c.clientid))}</span><div><h2>${esc(name(c.clientid))}</h2><p>Client #${c.clientid}</p></div><button class="btn" data-edit-client="${c.clientid}">${icon('edit')}Edit client</button></div><section class="detail-section"><h3>Contact & client information</h3><dl class="contact-grid"><div><dt>Email address</dt><dd>${p.email ? `<a href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : 'Not recorded'}</dd></div><div><dt>Phone number</dt><dd>${p.phone ? `<a href="tel:${esc(p.phone)}">${esc(p.phone)}</a>` : 'Not recorded'}</dd></div><div><dt>Address</dt><dd>${address ? [p.address, [p.city, p.state, p.zip?.trim()].filter(Boolean).join(', ')].filter(Boolean).map(esc).join('<br>') : 'Not recorded'}</dd></div><div><dt>Reminder method</dt><dd>${esc(c.remindermethod || 'Not recorded')}</dd></div><div><dt>How they found RAFT</dt><dd>${esc(c.foundout || 'Not recorded')}</dd></div><div><dt>Referred by</dt><dd>${c.referredby ? esc(name(c.referredby)) : 'Not recorded'}</dd></div></dl></section><section class="detail-section"><h3>Families & roles <span class="badge gray">${memberships.length}</span></h3>${memberships.length ? memberships.map(m => { const family = data.family.find(f => f.familyid === m.familyid); const roles = data.member_role.filter(r => r.memberid === c.clientid && r.familyid === m.familyid).map(r => data.role.find(role => role.roleid === r.roleid)?.rolename || `Role #${r.roleid}`); return `<div class="family-row"><div><strong>${esc(family?.familyname || `Family #${m.familyid}`)}</strong><small>Joined ${date(m.datejoined)}</small></div><div>${roles.length ? roles.map(r => `<span class="badge">${esc(r)}</span>`).join(', ') : '<span class="badge gray">No roles recorded</span>'}</div></div>`; }).join('') : '<p class="form-hint">No family memberships recorded for this client.</p>'}</section><div class="panel-head"><h2>Appointments <span class="badge gray">${appointments.length}</span></h2></div>${appointmentTable(appointments, false, c.clientid)}</section>`;
+  return `<section class="panel"><div class="detail-top"><span class="avatar">${esc(initials(c.clientid))}</span><div><h2>${esc(name(c.clientid))}</h2><p>Client #${c.clientid}</p></div>${canManage() ? `<button class="btn" data-edit-client="${c.clientid}">${icon('edit')}Edit client</button>` : ''}</div><section class="detail-section"><h3>Contact & client information</h3><dl class="contact-grid"><div><dt>Email address</dt><dd>${p.email ? `<a href="mailto:${esc(p.email)}">${esc(p.email)}</a>` : 'Not recorded'}</dd></div><div><dt>Phone number</dt><dd>${p.phone ? `<a href="tel:${esc(p.phone)}">${esc(p.phone)}</a>` : 'Not recorded'}</dd></div><div><dt>Address</dt><dd>${address ? [p.address, [p.city, p.state, p.zip?.trim()].filter(Boolean).join(', ')].filter(Boolean).map(esc).join('<br>') : 'Not recorded'}</dd></div><div><dt>Reminder method</dt><dd>${esc(c.remindermethod || 'Not recorded')}</dd></div><div><dt>How they found RAFT</dt><dd>${esc(c.foundout || 'Not recorded')}</dd></div><div><dt>Referred by</dt><dd>${c.referredby ? esc(name(c.referredby)) : 'Not recorded'}</dd></div></dl></section><section class="detail-section"><h3>Families & roles <span class="badge gray">${memberships.length}</span></h3>${memberships.length ? memberships.map(m => { const family = data.family.find(f => f.familyid === m.familyid); const roles = data.member_role.filter(r => r.memberid === c.clientid && r.familyid === m.familyid).map(r => data.role.find(role => role.roleid === r.roleid)?.rolename || `Role #${r.roleid}`); return `<div class="family-row"><div><strong>${esc(family?.familyname || `Family #${m.familyid}`)}</strong><small>Joined ${date(m.datejoined)}</small></div><div>${roles.length ? roles.map(r => `<span class="badge">${esc(r)}</span>`).join(', ') : '<span class="badge gray">No roles recorded</span>'}</div></div>`; }).join('') : '<p class="form-hint">No family memberships recorded for this client.</p>'}</section><div class="panel-head"><h2>Appointments <span class="badge gray">${appointments.length}</span></h2></div>${appointmentTable(appointments, false, c.clientid)}</section>`;
 }
 
 function bars(rows, label, count, value = count) {
@@ -235,17 +269,19 @@ function dashboardView() {
   const recorded = data.scheduledfor.filter(s => s.kept != null), kept = recorded.filter(s => s.kept).length;
   const referrals = Object.entries(data.client.reduce((out, c) => { const key = c.foundout || 'Not recorded'; out[key] = (out[key] || 0) + 1; return out; }, {})).sort((a,b) => b[1]-a[1]);
   const duration = data.appointment.reduce((n,a) => n + (a.duration || 0), 0);
-  return `${heading('THE BIGGER PICTURE', 'Small connections. Meaningful impact.', 'A live snapshot, calculated from all records in your RAFT database.', '<button class="btn" data-refresh>'+icon('refresh')+'Refresh data</button>')}<section class="stats">${stat('Total clients', data.client.length, `${data.person.length} people across all roles`, 'users')}${stat('Appointments', data.appointment.length, `${todayAppointments().length} scheduled today`, 'calendar')}${stat('Families', data.family.length, `${data.member_in_family.length} family memberships`, 'heart')}${stat('Attendance rate', recorded.length ? `${Math.round(kept/recorded.length*100)}%` : '—', recorded.length ? `${kept} kept of ${recorded.length} recorded client visits` : 'No attendance recorded', 'check')}</section><div class="dashboard-grid"><section class="panel"><div class="panel-head"><div><h2>Appointments by counselor</h2><p>All recorded appointments, across all dates</p></div>${icon('calendar')}</div>${bars(data.counselor, c => name(c.counselorid), c => data.appointment.filter(a => a.counselorid === c.counselorid).length)}<div class="metric-detail">${data.counselor.length} counselors · ${data.room.length} rooms · ${data.employee.length} employees<br>${duration} total scheduled minutes (${(duration/60).toFixed(1)} hours)</div></section><section class="panel"><div class="panel-head"><div><h2>Room usage</h2><p>All recorded appointments, across all dates</p></div>${icon('calendar')}</div>${bars(roomUsage(data.room, data.appointment), r => r.roomname || `Room ${r.roomnumber}`, r => r.count, r => `${r.count} ${r.count === 1 ? 'appointment' : 'appointments'} · ${r.minutes} min`)}<div class="metric-detail">Total minutes booked per room, summed from appointment durations. Rooms with no appointments are included.</div></section><section class="panel"><div class="panel-head"><div><h2>How clients found RAFT</h2><p>Referral sources from client records</p></div>${icon('users')}</div>${bars(referrals, r => r[0], r => r[1])}<div class="metric-detail">Attendance is counted per client–appointment link. Unrecorded attendance is excluded from the rate.</div></section></div><section class="panel" style="margin-top:24px"><div class="panel-head"><div><h2>Appointment history</h2><p>All appointments, most recent first</p></div><span class="badge gray">${data.appointment.length} total</span></div>${appointmentTable([...data.appointment].sort((a,b)=>String(b.appointmenttime).localeCompare(String(a.appointmenttime))))}</section><div class="status-line">Last refreshed ${time(lastLoaded.toISOString())} · All-time statistics</div>`;
+  return `${heading('THE BIGGER PICTURE', 'Small connections. Meaningful impact.', 'A live snapshot, calculated from all records in your RAFT database.', '<button class="btn" data-refresh>'+icon('refresh')+'Refresh data</button>')}<section class="stats">${stat('Total clients', data.client.length, `${data.person.length} people across all roles`, 'users')}${stat('Appointments', data.appointment.length, `${todayAppointments().length} scheduled today`, 'calendar')}${stat('Families', data.family.length, `${data.member_in_family.length} family memberships`, 'heart')}${stat('Attendance rate', recorded.length ? `${Math.round(kept/recorded.length*100)}%` : '—', recorded.length ? `${kept} kept of ${recorded.length} recorded client visits` : 'No attendance recorded', 'check')}</section><div class="dashboard-grid"><section class="panel"><div class="panel-head"><div><h2>Appointments by counselor</h2><p>All recorded appointments, across all dates</p></div>${icon('calendar')}</div>${bars(data.counselor, c => name(c.counselorid), c => data.appointment.filter(a => a.counselorid === c.counselorid).length)}<div class="metric-detail">${data.counselor.length} counselors · ${data.room.length} rooms · ${data.employee.length} employees<br>${duration} total scheduled minutes (${(duration/60).toFixed(1)} hours)</div></section><section class="panel"><div class="panel-head"><div><h2>Room usage</h2><p>All recorded appointments, across all dates</p></div>${icon('calendar')}</div>${bars(roomUsage(data.room, data.appointment), r => r.roomname || `Room ${r.roomnumber}`, r => r.count, r => `${r.count} ${r.count === 1 ? 'appointment' : 'appointments'} · ${r.minutes} min`)}<div class="metric-detail">Total minutes booked per room, summed from appointment durations. Rooms with no appointments are included.</div></section><section class="panel"><div class="panel-head"><div><h2>How clients found RAFT</h2><p>Referral sources from client records</p></div>${icon('users')}</div>${bars(referrals, r => r[0], r => r[1])}<div class="metric-detail">Attendance is counted per client–appointment link. Unrecorded attendance is excluded from the rate.</div></section></div><section class="panel" style="margin-top:24px"><div class="panel-head"><div><h2>Appointment history</h2><p>All appointments, most recent first</p></div><span class="badge gray">${data.appointment.length} total</span></div>${appointmentTable([...data.appointment].sort((a,b)=>String(b.appointmenttime).localeCompare(String(a.appointmenttime))))}</section>${databaseBrowser()}<div class="status-line">Last refreshed ${time(lastLoaded.toISOString())} · All-time statistics</div>`;
 }
 
 const option = (value, label, selected) => `<option value="${esc(value)}" ${String(value) === String(selected) ? 'selected' : ''}>${esc(label)}</option>`;
 const input = (label, key, value = '', type = 'text', max = '', required = false, extra = '') => `<div ${extra}><label for="${key}">${label}${required ? ' <span aria-hidden="true">*</span>' : ''}</label><input id="${key}" name="${key}" type="${type}" value="${esc(value)}" ${max ? `maxlength="${max}"` : ''} ${required ? 'required' : ''} ${type === 'datetime-local' ? 'step="1"' : ''}></div>`;
 const select = (label, key, options, required = false, hint = '') => `<div><label for="${key}">${label}${required ? ' *' : ''}</label><select id="${key}" name="${key}" ${required ? 'required' : ''}>${options}</select>${hint ? `<p class="form-hint">${hint}</p>` : ''}</div>`;
 function recordView() {
+  if (!editableTypes().includes(formType)) formType = editableTypes()[0];
+  if (!canManage() || !['client','appointment'].includes(formType)) return genericRecordView();
   const isClient = formType === 'client';
   const existing = isClient ? data.client : data.appointment;
   const choices = existing.map(r => option(isClient ? r.clientid : r.appointmentid, isClient ? `${name(r.clientid)} · #${r.clientid}` : `#${r.appointmentid} · ${date(r.appointmenttime)} · ${time(r.appointmenttime)}`, recordID)).join('');
-  return `${heading('KEEP CARE MOVING', 'The right details make a difference.', 'Add a new record or update an existing one. Changes save directly to RAFT.')}<section class="panel form-shell"><div class="form-tabs" role="tablist" aria-label="Record type"><button class="form-tab ${isClient ? 'active' : ''}" role="tab" aria-selected="${isClient}" data-form-type="client">${icon('users')} &nbsp; Client</button><button class="form-tab ${!isClient ? 'active' : ''}" role="tab" aria-selected="${!isClient}" data-form-type="appointment">${icon('calendar')} &nbsp; Appointment</button></div><form id="record-form"><div class="form-body"><div id="form-feedback" role="status" aria-live="polite"></div><div class="form-controls">${select('What would you like to do?', 'form-mode', option('new', 'Add a new record', formMode) + option('edit', 'Edit an existing record', formMode))}${formMode === 'edit' ? select(`Choose ${isClient ? 'a client' : 'an appointment'}`, 'record-id', option('', 'Select a record…', recordID) + choices, true) : '<div class="form-hint" style="align-self:center">Record IDs are assigned by the database.<br>Fields marked * are required by this form.</div>'}</div><div id="record-fields">${formMode === 'new' || recordID ? (isClient ? clientFields() : appointmentFields()) : empty('Choose a record to get started.', 'Its existing details will load into the form.', 'edit')}</div></div><div class="form-actions"><p>No changes are saved until you select Save.</p><div><button class="btn" type="button" id="reset-form">Reset</button><button class="btn primary" id="save-button" type="submit" ${formMode === 'edit' && !recordID ? 'disabled' : ''}>${icon('check')}Save ${isClient ? 'client' : 'appointment'}</button></div></div></form></section><div class="status-line">Stored only in your existing raft schema · No local record storage</div>`;
+  return `${heading('KEEP CARE MOVING', 'The right details make a difference.', 'Add a new record or update an existing one. Changes save directly to RAFT.')}<section class="panel form-shell">${typeChooser()}<div class="form-tabs" role="tablist" aria-label="Record type"><button class="form-tab ${isClient ? 'active' : ''}" role="tab" aria-selected="${isClient}" data-form-type="client">${icon('users')} &nbsp; Client</button><button class="form-tab ${!isClient ? 'active' : ''}" role="tab" aria-selected="${!isClient}" data-form-type="appointment">${icon('calendar')} &nbsp; Appointment</button></div><form id="record-form"><div class="form-body"><div id="form-feedback" role="status" aria-live="polite"></div><div class="form-controls">${select('What would you like to do?', 'form-mode', option('new', 'Add a new record', formMode) + option('edit', 'Edit an existing record', formMode))}${formMode === 'edit' ? select(`Choose ${isClient ? 'a client' : 'an appointment'}`, 'record-id', option('', 'Select a record…', recordID) + choices, true) : '<div class="form-hint" style="align-self:center">Record IDs are assigned by the database.<br>Fields marked * are required by this form.</div>'}</div><div id="record-fields">${formMode === 'new' || recordID ? (isClient ? clientFields() : appointmentFields()) : empty('Choose a record to get started.', 'Its existing details will load into the form.', 'edit')}</div></div><div class="form-actions"><p>No changes are saved until you select Save.</p><div><button class="btn" type="button" id="reset-form">Reset</button><button class="btn primary" id="save-button" type="submit" ${formMode === 'edit' && !recordID ? 'disabled' : ''}>${icon('check')}Save ${isClient ? 'client' : 'appointment'}</button></div></div></form></section><div class="status-line">Stored only in your existing raft schema · No local record storage</div>`;
 }
 function clientFields() {
   const c = data.client.find(c => c.clientid === Number(recordID)) || {};
@@ -256,15 +292,16 @@ function clientFields() {
 function appointmentFields() {
   const a = formMode === 'edit' ? data.appointment.find(a => a.appointmentid === Number(recordID)) || {} : {};
   const linked = data.scheduledfor.filter(s=>s.appointmentid === a.appointmentid);
-  return `<h2 class="form-subheading">Appointment details</h2><div class="form-grid">${input('Date & time','appointmenttime',a.appointmenttime?.slice(0,19),'datetime-local','',true)}<div><label for="duration">Duration (minutes) *</label><input id="duration" name="duration" type="number" min="1" max="2147483647" step="1" value="${esc(a.duration)}" required></div>${select('Counselor','counselorid',option('', 'Select a counselor…', '') + data.counselor.map(c=>option(c.counselorid,`${name(c.counselorid)}${c.degreesuffix ? ', '+c.degreesuffix : ''}`,a.counselorid)).join(''),true)}${select('Recorded by (employee)','employeeid',option('', 'Select an employee…', '') + data.employee.map(e=>option(e.employeeid,name(e.employeeid),a.employeeid)).join(''),true)}${select('Room','roomnumber',option('', 'Select a room…', '') + data.room.map(r=>option(r.roomnumber,r.roomname || `Room ${r.roomnumber}`,a.roomnumber)).join(''),true)}<div class="full"><label for="notes">Notes</label><textarea name="notes" id="notes" maxlength="3000" placeholder="Additional appointment information…">${esc(a.notes)}</textarea><p class="form-hint">Up to 3,000 characters. Date and time are saved as entered, without a time zone.</p></div><div class="full"><label>${formMode === 'new' ? 'Clients for this appointment (optional)' : 'Linked clients'}</label>${formMode === 'new' ? `<div class="checklist">${data.client.length ? data.client.map(c=>`<label><input type="checkbox" name="clientids" value="${c.clientid}">${esc(name(c.clientid))}</label>`).join('') : '<span class="form-hint">No clients are available.</span>'}</div><p class="form-hint">Selected clients are linked through ScheduledFor. Attendance and assignments are left unrecorded.</p>` : `<div>${linked.length ? linked.map(s=>`<span class="badge">${esc(name(s.clientid))}</span>`).join('') : '<span class="form-hint">No linked clients.</span>'}</div><p class="form-hint">Saving updates the appointment only; existing client links, assignments, and attendance remain unchanged.</p>`}</div></div>`;
+  return `<h2 class="form-subheading">Appointment details</h2><div class="form-grid">${input('Date & time','appointmenttime',a.appointmenttime?.slice(0,19),'datetime-local','',true)}<div><label for="duration">Duration (minutes) *</label><input id="duration" name="duration" type="number" min="1" max="2147483647" step="1" value="${esc(a.duration)}" required></div>${select('Counselor','counselorid',option('', 'Select a counselor…', '') + data.counselor.map(c=>option(c.counselorid,`${name(c.counselorid)}${c.degreesuffix ? ', '+c.degreesuffix : ''}`,a.counselorid)).join(''),true)}${select('Recorded by (employee)','employeeid',option('', 'Select an employee…', '') + data.employee.map(e=>option(e.employeeid,name(e.employeeid),a.employeeid)).join(''),true)}${select('Room','roomnumber',option('', 'Select a room…', '') + data.room.map(r=>option(r.roomnumber,r.roomname || `Room ${r.roomnumber}`,a.roomnumber)).join(''),true)}${staffRole !== 'raft_scheduler' ? `<div class="full"><label for="notes">Notes</label><textarea name="notes" id="notes" maxlength="3000" placeholder="Additional appointment information…">${esc(a.notes)}</textarea><p class="form-hint">Up to 3,000 characters. Date and time are saved as entered, without a time zone.</p></div>` : ''}<div class="full"><label>${formMode === 'new' ? 'Clients for this appointment (optional)' : 'Linked clients'}</label>${formMode === 'new' ? `<div class="checklist">${data.client.length ? data.client.map(c=>`<label><input type="checkbox" name="clientids" value="${c.clientid}">${esc(name(c.clientid))}</label>`).join('') : '<span class="form-hint">No clients are available.</span>'}</div><p class="form-hint">Selected clients are linked through ScheduledFor. Attendance and assignments are left unrecorded.</p>` : `<div>${linked.length ? linked.map(s=>`<span class="badge">${esc(name(s.clientid))}</span>`).join('') : '<span class="form-hint">No linked clients.</span>'}</div><p class="form-hint">Saving updates the appointment only; existing client links, assignments, and attendance remain unchanged.</p>`}</div></div>`;
 }
 
-function editRecord(type, id) { formType = type; formMode = 'edit'; recordID = String(id); partialID = null; if (page !== 'records') location.hash = 'records'; else render(); }
+function editRecord(type, id) { if (!editableTypes().includes(type)) return; formType = type; formMode = 'edit'; recordID = String(id); partialID = null; if (page !== 'records') location.hash = 'records'; else render(); }
 function wire() {
   document.querySelectorAll('[data-refresh]').forEach(b => b.onclick = load);
   document.querySelectorAll('[data-edit-client]').forEach(b => b.onclick = () => editRecord('client', b.dataset.editClient));
   document.querySelectorAll('[data-edit-appointment]').forEach(b => b.onclick = () => editRecord('appointment', b.dataset.editAppointment));
   wireClients();
+  wireExtra();
   const searchInput = document.querySelector('#client-search');
   if (searchInput) searchInput.oninput = e => { search = e.target.value; document.querySelector('#client-list').innerHTML = clientItems(); document.querySelector('#client-count').textContent = filteredClients().length; wireClients(); };
   document.querySelectorAll('[data-form-type]').forEach(b => b.onclick = () => { if (saving) return; formType = b.dataset.formType; recordID = ''; partialID = null; existingPersonID = ''; render(); });
@@ -285,7 +322,7 @@ function wireClients() {
 function toast(message) { const el = document.querySelector('#toast'); el.textContent = message; el.style.display = 'block'; setTimeout(()=>el.style.display='none',5000); }
 async function writeForSession(query, label, epoch) { if (!session || epoch !== authEpoch) throw new Error('Session ended.'); const result = await query; if (!session || epoch !== authEpoch) throw new Error('Session ended.'); if (result.error) throw new Error(`${label}: ${result.error.message}`); return result.data; }
 async function saveRecord(event) {
-  event.preventDefault(); if (saving || !session) return;
+  event.preventDefault(); if (saving || !session || !canManage() || !['client','appointment'].includes(formType)) return;
   const epoch = authEpoch;
   const write = (query, label) => writeForSession(query, label, epoch);
   const form = event.currentTarget, fields = new FormData(form), feedback = document.querySelector('#form-feedback');
@@ -307,7 +344,7 @@ async function saveRecord(event) {
       else await write(db.from('client').insert({ ...client, clientid:id }).select('clientid').single(), 'Creating client');
       selectedClient = id;
     } else {
-      const appointment = { appointmenttime:get('appointmenttime'), duration:Number(get('duration')), counselorid:Number(get('counselorid')), employeeid:Number(get('employeeid')), roomnumber:Number(get('roomnumber')), notes:get('notes') };
+      const appointment = { appointmenttime:get('appointmenttime'), duration:Number(get('duration')), counselorid:Number(get('counselorid')), employeeid:Number(get('employeeid')), roomnumber:Number(get('roomnumber')), ...(staffRole === 'raft_admin' ? { notes:get('notes') } : {}) };
       if (!Number.isInteger(appointment.duration) || appointment.duration <= 0) throw new Error('Enter a positive whole number of minutes.');
       if (id) { const rows = await write(db.from('appointment').update(appointment).eq('appointmentid',id).select('appointmentid'), 'Saving appointment'); if (rows.length !== 1) throw new Error('Appointment update was not confirmed. Check the existing database permissions.'); }
       else { const row = await write(db.from('appointment').insert(appointment).select('appointmentid').single(), 'Creating appointment'); id = row.appointmentid; partialID = id; }
@@ -317,7 +354,7 @@ async function saveRecord(event) {
         if (clientIDs.length) {
           const current = await write(db.from('scheduledfor').select('clientid').eq('appointmentid',id), 'Checking client links');
           const missing = clientIDs.filter(c => !current.some(r=>r.clientid===c)).map(c=>({appointmentid:id, clientid:c}));
-          if (missing.length) await write(db.from('scheduledfor').insert(missing).select(), 'Linking clients');
+          if (missing.length) await write(db.from('scheduledfor').insert(missing).select('appointmentid,clientid'), 'Linking clients');
         }
       }
     }
@@ -329,6 +366,74 @@ async function saveRecord(event) {
     feedback.innerHTML = `<div class="error-box" role="alert">${esc(step + e.message)}${partialID ? `<br>The created record ID is #${partialID}. Retry Save in this form to finish without creating another ${formType === 'client' ? 'Person' : 'Appointment'} row. Resetting or leaving the form abandons this retry.` : ''}</div>`;
     feedback.scrollIntoView({behavior:'smooth',block:'center'});
     form.querySelectorAll('button,input,select,textarea').forEach(e=>e.disabled=false);
+  } finally { if (epoch === authEpoch) saving = false; }
+}
+
+const identityTables = ['person','appointment','family','role'];
+const fieldLimits = { firstname:50, lastname:50, address:50, city:50, state:2, zip:10, phone:14, email:100, foundout:50, remindermethod:50, degreesuffix:50, roomname:50, familyname:100, rolename:50, notes:3000, assignment:2000 };
+const primaryKeys = table => keys[tables.indexOf(table)].split(',');
+const rowKey = (table, row) => primaryKeys(table).map(key => row[key]).join(':');
+function typeChooser() {
+  return `<div class="form-body">${select('Record type', 'record-type', editableTypes().map(t => option(t, t === 'appointment' && !canManage() ? 'Appointment notes (clinical only)' : t, formType)).join(''))}</div>`;
+}
+function writableColumns(table) {
+  if (staffRole === 'raft_counselor') return table === 'appointment' ? ['notes'] : table === 'scheduledfor' ? ['assignment','kept'] : [];
+  if (!editableTypes().includes(table)) return [];
+  return visibleColumns(table).split(',').filter(key => !(formMode === 'edit' && primaryKeys(table).includes(key)) && !(formMode === 'new' && identityTables.includes(table) && primaryKeys(table).includes(key)));
+}
+function genericField(key, value) {
+  if (key === 'kept') return select('kept',key,option('', 'Not recorded', value == null ? '' : String(value)) + option('true','Kept',String(value)) + option('false','Not kept',String(value)));
+  if (key === 'notes' || key === 'assignment') return `<div class="full"><label for="${key}">${key}</label><textarea id="${key}" name="${key}" maxlength="${fieldLimits[key]}">${esc(value)}</textarea></div>`;
+  const integer = key.endsWith('id') || key === 'roomnumber' || key === 'duration';
+  const type = integer || key === 'wage' ? 'number' : key.startsWith('date') ? 'date' : key === 'email' ? 'email' : 'text';
+  const required = key === 'supervisorid' || (primaryKeys(formType).includes(key) && formMode === 'new');
+  return input(key,key,value ?? '',type,fieldLimits[key] || '',required).replace('type="number"', `type="number" step="${key === 'wage' ? '0.01' : '1'}"`);
+}
+function genericRecordView() {
+  if (!canManage()) formMode = 'edit';
+  const row = data[formType].find(r => rowKey(formType,r) === recordID);
+  return `${heading('RECORD DETAILS', canManage() ? 'Add or edit a record' : 'Update clinical details', canManage() ? 'Changes save directly to the existing RAFT tables. No deletion is available.' : 'Only appointment notes, client assignments, and attendance can be updated. Scheduling and client information are read-only.')}<section class="panel form-shell">${typeChooser()}<form id="generic-form"><div class="form-body"><div id="form-feedback" role="status"></div><div class="form-controls">${canManage() ? select('Action','form-mode',option('new','Add a new record',formMode)+option('edit','Edit an existing record',formMode)) : '<p>Edit existing clinical information</p>'}${formMode === 'edit' ? select('Choose a record','record-id',option('','Select a record',recordID)+data[formType].map(r => option(rowKey(formType,r),`${rowKey(formType,r)} - ${formType === 'appointment' ? date(r.appointmenttime)+' '+time(r.appointmenttime) : formType === 'scheduledfor' ? name(r.clientid)+' - '+date(data.appointment.find(a=>a.appointmentid===r.appointmentid)?.appointmenttime) : r.familyname || r.rolename || r.roomname || (r.personid || r.employeeid || r.counselorid || r.memberid ? name(r.personid || r.employeeid || r.counselorid || r.memberid) : formType)}`,recordID)).join(''),true) : '<p>Identity IDs are assigned by the database. Foreign keys must reference existing records.</p>'}</div>${formMode === 'new' || row ? `<div class="form-grid">${writableColumns(formType).map(key=>genericField(key,row?.[key])).join('')}</div>` : empty('Choose a record.', 'Only permitted fields will be editable.', 'edit')}</div><div class="form-actions"><p>No records can be deleted.</p><button class="btn primary" type="submit" ${formMode === 'edit' && !row ? 'disabled' : ''}>Save changes</button></div></form></section>`;
+}
+function databaseBrowser() {
+  const cols = visibleColumns(browseTable).split(',');
+  return `<section class="panel" style="margin-top:24px"><div class="panel-head"><h2>Database records</h2></div><div class="form-body">${select('View table','browse-table',tables.map(t=>option(t,t,browseTable)).join(''))}<p class="form-hint">Read-only view of every column available to your role. Use Add / edit record for permitted changes.</p></div><div class="table-scroll"><table><thead><tr>${cols.map(c=>`<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${data[browseTable].map(row=>`<tr>${cols.map(c=>`<td>${esc(row[c] == null ? 'Not recorded' : row[c])}</td>`).join('')}</tr>`).join('')}</tbody></table></div></section>`;
+}
+function wireExtra() {
+  const type = document.querySelector('#record-type');
+  if (type) type.onchange = () => { if (saving) return; formType = type.value; recordID = ''; partialID = null; existingPersonID = ''; render(); };
+  const browse = document.querySelector('#browse-table');
+  if (browse) browse.onchange = () => { browseTable = browse.value; render(); };
+  const form = document.querySelector('#generic-form');
+  if (form) form.onsubmit = saveGeneric;
+}
+async function saveGeneric(event) {
+  event.preventDefault();
+  if (saving || !session || !staffRole || !editableTypes().includes(formType) || (!canManage() && formMode !== 'edit')) return;
+  const form = event.currentTarget, fields = new FormData(form), epoch = authEpoch, table = formType;
+  const row = data[table].find(r=>rowKey(table,r)===recordID);
+  const feedback = document.querySelector('#form-feedback');
+  if (formMode === 'edit' && !row) return;
+  const payload = {};
+  try {
+    for (const key of writableColumns(table)) {
+      const value = String(fields.get(key) ?? '').trim();
+      payload[key] = value === '' ? null : key === 'kept' ? value === 'true' : key.endsWith('id') || ['roomnumber','duration','wage'].includes(key) ? Number(value) : value;
+      if (typeof payload[key] === 'number' && (!Number.isFinite(payload[key]) || (key !== 'wage' && !Number.isInteger(payload[key])))) throw new Error(`${key} must be a valid number.`);
+    }
+    saving = true;
+    form.querySelectorAll('input,select,textarea,button').forEach(el=>el.disabled=true);
+    let query;
+    if (formMode === 'edit') {
+      query = db.from(table).update(payload);
+      for (const key of primaryKeys(table)) query = query.eq(key,row[key]);
+    } else query = db.from(table).insert(payload);
+    const saved = await writeForSession(query.select(primaryKeys(table).join(',')), 'Saving record', epoch);
+    if (saved.length !== 1) throw new Error('The database did not confirm the save. Check your permissions.');
+    recordID = ''; toast('Record saved to RAFT.'); await load();
+  } catch (error) {
+    if (epoch !== authEpoch) return;
+    feedback.innerHTML = `<div class="error-box" role="alert">${esc(error.message)}</div>`;
+    form.querySelectorAll('input,select,textarea,button').forEach(el=>el.disabled=false);
   } finally { if (epoch === authEpoch) saving = false; }
 }
 
