@@ -9,6 +9,23 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <section id="auth-screen" class="auth-screen" aria-labelledby="signin-title">
+    <div class="auth-card panel">
+      <div class="eyebrow">RAFT FRONT DESK</div>
+      <h1 id="signin-title">Sign in</h1>
+      <p>Sign in to open your workspace.</p>
+      <form id="signin-form">
+        <label for="signin-email">Email</label>
+        <input id="signin-email" name="email" type="email" autocomplete="username" required disabled>
+        <label for="signin-password">Password</label>
+        <input id="signin-password" name="password" type="password" autocomplete="current-password" required disabled>
+        <p id="auth-status" role="status">Checking your session...</p>
+        <div id="auth-error" class="error-inline" role="alert" hidden></div>
+        <button id="signin-button" class="btn primary" type="submit" disabled>Sign in</button>
+      </form>
+    </div>
+  </section>
+  <div id="app-shell" hidden>
   <aside class="sidebar">
     <a class="brand" href="#home" aria-label="RAFT home"><span class="brand-mark"><svg viewBox="0 0 40 40" fill="none"><path d="M6 13l14-7 14 7-14 7L6 13Z" fill="currentColor"/><path d="m6 21 14 7 14-7M6 29l14 7 14-7" stroke="currentColor" stroke-width="3"/></svg></span><span>raft<span class="brand-dot">.</span></span></a>
     <div class="brand-caption">RICHMOND AREA<br>FAMILY THERAPY</div>
@@ -18,11 +35,12 @@
     <div class="desk-profile"><span class="avatar">FD</span><div><strong>Front desk</strong><span>RAFT workspace</span></div><span class="profile-dot"></span></div>
   </aside>
   <div class="workspace">
-    <header class="topbar"><div><span class="breadcrumb">Workspace</span><span class="slash">/</span><strong id="page-label">Home</strong></div><div class="topbar-right"><span id="connection" class="connection">Connecting</span><span class="top-date" id="top-date"></span></div></header>
+    <header class="topbar"><div><span class="breadcrumb">Workspace</span><span class="slash">/</span><strong id="page-label">Home</strong></div><div class="topbar-right"><span id="connection" class="connection">Connecting</span><span class="top-date" id="top-date"></span><button id="signout-button" class="btn" type="button">Sign out</button></div></header>
     <main id="main" tabindex="-1"><div class="loading" role="status">Opening your workspace…</div></main>
     <footer><span>Richmond Area Family Therapy</span><span>A workspace for people who care.</span></footer>
   </div>
   <div id="toast" role="status" aria-live="polite"></div>
-  <script type="module" src="app.js" onerror="document.querySelector('#main').innerHTML='<div class=&quot;error-box&quot; role=&quot;alert&quot;>The workspace could not start. Check your internet connection and reload this page.</div>'; document.querySelector('#connection').textContent='Connection issue';"></script>
+  </div>
+  <script type="module" src="app.js" onerror="document.querySelector('#auth-status').textContent='The workspace could not start. Check your internet connection and reload this page.';"></script>
 </body>
 </html>

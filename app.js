@@ -1,6 +1,6 @@
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.119.0/+esm';
 
-const db = createClient('https://rcdgatiwfsrqkshyfmea.supabase.co', 'sb_publishable__QwH7rah3l7rmoODq3jhcg_IuNwyFRs', { db: { schema: 'raft' }, auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false } });
+const db = createClient('https://rcdgatiwfsrqkshyfmea.supabase.co', 'sb_publishable__QwH7rah3l7rmoODq3jhcg_IuNwyFRs', { db: { schema: 'raft' }, auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false } });
 const paths = { home: ['Home', 'home'], clients: ['Client lookup', 'users'], dashboard: ['Dashboard', 'chart'], records: ['Add / edit record', 'plus'] };
 const shapes = {
   home: '<path d="m3 10 9-7 9 7v10a1 1 0 0 1-1 1h-5v-7H9v7H4a1 1 0 0 1-1-1Z"/>',
@@ -22,6 +22,96 @@ const tables = ['person', 'client', 'appointment', 'scheduledfor', 'family', 'me
 const keys = ['personid', 'clientid', 'appointmentid', 'appointmentid,clientid', 'familyid', 'familyid,memberid', 'familyid,memberid,roleid', 'roleid', 'counselorid', 'employeeid', 'roomnumber'];
 let data = null, loadError = '', loading = true, selectedClient = null, search = '', page = 'home', formType = 'client', formMode = 'new', recordID = '', partialID = null, existingPersonID = '', saving = false;
 let lastLoaded = null;
+let session = null, authReady = false, authEpoch = 0, loadSequence = 0;
+const authScreen = document.querySelector('#auth-screen');
+const appShell = document.querySelector('#app-shell');
+const authForm = document.querySelector('#signin-form');
+const authError = document.querySelector('#auth-error');
+const authStatus = document.querySelector('#auth-status');
+const signinButton = document.querySelector('#signin-button');
+const signoutButton = document.querySelector('#signout-button');
+
+function showAuthError(message = '') {
+  authError.textContent = message;
+  authError.hidden = !message;
+}
+function applySession(nextSession) {
+  const changed = session?.user.id !== nextSession?.user.id;
+  session = nextSession;
+  authReady = true;
+  authScreen.hidden = !!session;
+  appShell.hidden = !session;
+  authStatus.textContent = '';
+  authForm.querySelectorAll('input,button').forEach(el => el.disabled = false);
+  if (changed || !session) {
+    authEpoch++;
+    loadSequence++;
+    data = null; loadError = ''; lastLoaded = null; loading = true;
+    selectedClient = null; search = ''; formType = 'client'; formMode = 'new';
+    recordID = ''; partialID = null; existingPersonID = ''; saving = false;
+    main.innerHTML = '';
+    document.querySelector('#toast').style.display = 'none';
+    authForm.reset();
+    showAuthError();
+  }
+  if (session && changed) {
+    location.hash = 'home';
+    // Keep Supabase work outside the synchronous Auth callback.
+    const epoch = authEpoch;
+    setTimeout(() => { if (session && epoch === authEpoch) void load(); }, 0);
+  }
+}
+
+authForm.addEventListener('submit', async event => {
+  event.preventDefault();
+  if (!authReady || signinButton.disabled) return;
+  showAuthError();
+  const email = authForm.elements.email.value.trim();
+  const password = authForm.elements.password.value;
+  authForm.querySelectorAll('input,button').forEach(el => el.disabled = true);
+  authStatus.textContent = 'Signing in...';
+  try {
+    const { data: result, error } = await db.auth.signInWithPassword({ email, password });
+    if (error) throw error;
+    applySession(result.session);
+  } catch (error) {
+    authStatus.textContent = '';
+    showAuthError(error.code === 'invalid_credentials' || error.status === 400
+      ? 'The email or password is incorrect. Please try again.'
+      : 'Unable to sign in. Please check your connection and try again.');
+  } finally {
+    authForm.elements.password.value = '';
+    authForm.querySelectorAll('input,button').forEach(el => el.disabled = false);
+  }
+});
+
+signoutButton.addEventListener('click', async () => {
+  signoutButton.disabled = true;
+  try {
+    const { error } = await db.auth.signOut({ scope: 'local' });
+    if (error) throw error;
+    applySession(null);
+    location.hash = 'home';
+  } catch {
+    toast('Unable to sign out. Please check your connection and try again.');
+  } finally { signoutButton.disabled = false; }
+});
+
+async function initializeAuth() {
+  db.auth.onAuthStateChange((_event, nextSession) => {
+    applySession(nextSession);
+  });
+  const epoch = authEpoch;
+  try {
+    const { data: result, error } = await db.auth.getSession();
+    if (error) throw error;
+    if (epoch === authEpoch) applySession(result.session);
+  } catch {
+    if (epoch !== authEpoch) return;
+    applySession(null);
+    showAuthError('Your saved session could not be restored. Please sign in again.');
+  }
+}
 const name = id => { const p = data?.person.find(p => p.personid === Number(id)); return p ? [p.firstname, p.lastname].filter(Boolean).join(' ') || `Person #${id}` : `Person #${id}`; };
 const initials = id => name(id).split(' ').map(n => n[0]).slice(0, 2).join('');
 const date = (v, options = {}) => v ? new Intl.DateTimeFormat('en-US', { month: 'short', day: 'numeric', year: 'numeric', ...options }).format(new Date(v.length === 10 ? `${v}T12:00:00` : v)) : 'Not recorded';
@@ -33,9 +123,10 @@ const heading = (eyebrow, title, sub, action = '') => `<div class="page-heading"
 const empty = (title, sub, symbol = 'calendar') => `<div class="empty"><span class="empty-symbol">${icon(symbol)}</span><strong>${title}</strong>${sub}</div>`;
 const stat = (label, value, note, symbol) => `<article class="stat"><div class="stat-top">${label}<span class="stat-icon">${icon(symbol)}</span></div><div class="stat-value">${value}</div><div class="stat-note">${note}</div></article>`;
 
-async function fetchTable(table, index) {
+async function fetchTable(table, index, epoch) {
   const rows = [];
   for (let offset = 0; ;) {
+    if (!session || epoch !== authEpoch) throw new Error('Session ended.');
     let query = db.from(table).select('*', { count: 'exact' });
     for (const key of keys[index].split(',')) query = query.order(key);
     const { data: batch, error, count } = await query.range(offset, offset + 499);
@@ -47,15 +138,19 @@ async function fetchTable(table, index) {
   }
 }
 async function load() {
+  if (!session) return;
+  const epoch = authEpoch, sequence = ++loadSequence;
   loading = true; loadError = ''; render();
   document.querySelector('#connection').textContent = 'Connecting';
   try {
-    const results = await Promise.all(tables.map(fetchTable));
+    const results = await Promise.all(tables.map((table, index) => fetchTable(table, index, epoch)));
+    if (!session || epoch !== authEpoch || sequence !== loadSequence) return;
     data = Object.fromEntries(tables.map((t, i) => [t, results[i]]));
     lastLoaded = new Date();
     document.querySelector('#connection').textContent = 'Database connected';
     document.querySelector('#connection').className = 'connection';
   } catch (e) {
+    if (!session || epoch !== authEpoch || sequence !== loadSequence) return;
     loadError = e.message;
     document.querySelector('#connection').textContent = 'Connection issue';
     document.querySelector('#connection').className = 'connection error';
@@ -64,6 +159,7 @@ async function load() {
 }
 
 function render() {
+  if (!authReady || !session) return;
   page = location.hash.slice(1).split('?')[0] || 'home';
   if (!paths[page]) { location.hash = 'home'; return; }
   document.title = `${paths[page][0]} · RAFT`;
@@ -149,7 +245,7 @@ function recordView() {
   const isClient = formType === 'client';
   const existing = isClient ? data.client : data.appointment;
   const choices = existing.map(r => option(isClient ? r.clientid : r.appointmentid, isClient ? `${name(r.clientid)} · #${r.clientid}` : `#${r.appointmentid} · ${date(r.appointmenttime)} · ${time(r.appointmenttime)}`, recordID)).join('');
-  return `${heading('KEEP CARE MOVING', 'The right details make a difference.', 'Add a new record or update an existing one. Changes save directly to RAFT.')}<section class="panel form-shell"><div class="form-tabs" role="tablist" aria-label="Record type"><button class="form-tab ${isClient ? 'active' : ''}" role="tab" aria-selected="${isClient}" data-form-type="client">${icon('users')} &nbsp; Client</button><button class="form-tab ${!isClient ? 'active' : ''}" role="tab" aria-selected="${!isClient}" data-form-type="appointment">${icon('calendar')} &nbsp; Appointment</button></div><form id="record-form"><div class="form-body"><div id="form-feedback" role="status" aria-live="polite"></div><div class="form-controls">${select('What would you like to do?', 'form-mode', option('new', 'Add a new record', formMode) + option('edit', 'Edit an existing record', formMode))}${formMode === 'edit' ? select(`Choose ${isClient ? 'a client' : 'an appointment'}`, 'record-id', option('', 'Select a record…', recordID) + choices, true) : '<div class="form-hint" style="align-self:center">Record IDs are assigned by the database.<br>Fields marked * are required by this form.</div>'}</div><div id="record-fields">${formMode === 'new' || recordID ? (isClient ? clientFields() : appointmentFields()) : empty('Choose a record to get started.', 'Its existing details will load into the form.', 'edit')}</div></div><div class="form-actions"><p>No changes are saved until you select Save.</p><div><button class="btn" type="button" id="reset-form">Reset</button><button class="btn primary" id="save-button" type="submit" ${formMode === 'edit' && !recordID ? 'disabled' : ''}>${icon('check')}Save ${isClient ? 'client' : 'appointment'}</button></div></div></form></section><div class="status-line">Stored only in your existing raft schema · No local data storage</div>`;
+  return `${heading('KEEP CARE MOVING', 'The right details make a difference.', 'Add a new record or update an existing one. Changes save directly to RAFT.')}<section class="panel form-shell"><div class="form-tabs" role="tablist" aria-label="Record type"><button class="form-tab ${isClient ? 'active' : ''}" role="tab" aria-selected="${isClient}" data-form-type="client">${icon('users')} &nbsp; Client</button><button class="form-tab ${!isClient ? 'active' : ''}" role="tab" aria-selected="${!isClient}" data-form-type="appointment">${icon('calendar')} &nbsp; Appointment</button></div><form id="record-form"><div class="form-body"><div id="form-feedback" role="status" aria-live="polite"></div><div class="form-controls">${select('What would you like to do?', 'form-mode', option('new', 'Add a new record', formMode) + option('edit', 'Edit an existing record', formMode))}${formMode === 'edit' ? select(`Choose ${isClient ? 'a client' : 'an appointment'}`, 'record-id', option('', 'Select a record…', recordID) + choices, true) : '<div class="form-hint" style="align-self:center">Record IDs are assigned by the database.<br>Fields marked * are required by this form.</div>'}</div><div id="record-fields">${formMode === 'new' || recordID ? (isClient ? clientFields() : appointmentFields()) : empty('Choose a record to get started.', 'Its existing details will load into the form.', 'edit')}</div></div><div class="form-actions"><p>No changes are saved until you select Save.</p><div><button class="btn" type="button" id="reset-form">Reset</button><button class="btn primary" id="save-button" type="submit" ${formMode === 'edit' && !recordID ? 'disabled' : ''}>${icon('check')}Save ${isClient ? 'client' : 'appointment'}</button></div></div></form></section><div class="status-line">Stored only in your existing raft schema · No local record storage</div>`;
 }
 function clientFields() {
   const c = data.client.find(c => c.clientid === Number(recordID)) || {};
@@ -187,9 +283,11 @@ function wireClients() {
   document.querySelectorAll('[data-client]').forEach(b => b.onclick = () => { selectedClient = Number(b.dataset.client); document.querySelector('#client-list').innerHTML = clientItems(); document.querySelector('#client-detail').innerHTML = clientDetail(); wire(); });
 }
 function toast(message) { const el = document.querySelector('#toast'); el.textContent = message; el.style.display = 'block'; setTimeout(()=>el.style.display='none',5000); }
-async function write(query, label) { const result = await query; if (result.error) throw new Error(`${label}: ${result.error.message}`); return result.data; }
+async function writeForSession(query, label, epoch) { if (!session || epoch !== authEpoch) throw new Error('Session ended.'); const result = await query; if (!session || epoch !== authEpoch) throw new Error('Session ended.'); if (result.error) throw new Error(`${label}: ${result.error.message}`); return result.data; }
 async function saveRecord(event) {
-  event.preventDefault(); if (saving) return;
+  event.preventDefault(); if (saving || !session) return;
+  const epoch = authEpoch;
+  const write = (query, label) => writeForSession(query, label, epoch);
   const form = event.currentTarget, fields = new FormData(form), feedback = document.querySelector('#form-feedback');
   const get = key => String(fields.get(key) || '').trim() || null;
   saving = true;
@@ -227,12 +325,13 @@ async function saveRecord(event) {
     toast(`${formType === 'client' ? 'Client' : 'Appointment'} #${id} saved to RAFT.`);
     await load();
   } catch (e) {
+    if (!session || epoch !== authEpoch) return;
     feedback.innerHTML = `<div class="error-box" role="alert">${esc(step + e.message)}${partialID ? `<br>The created record ID is #${partialID}. Retry Save in this form to finish without creating another ${formType === 'client' ? 'Person' : 'Appointment'} row. Resetting or leaving the form abandons this retry.` : ''}</div>`;
     feedback.scrollIntoView({behavior:'smooth',block:'center'});
     form.querySelectorAll('button,input,select,textarea').forEach(e=>e.disabled=false);
-  } finally { saving = false; }
+  } finally { if (epoch === authEpoch) saving = false; }
 }
 
 document.querySelector('#top-date').textContent = date(new Date().toISOString(), { weekday: 'short' });
 window.addEventListener('hashchange', () => { if (saving) return; partialID = null; render(); window.scrollTo(0,0); });
-load();
+void initializeAuth();
